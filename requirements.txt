@@ -1,0 +1,7 @@
+Flask
+Flask-Cors
+python-dotenv
+google-generativeai
+gunicorn
+tenacity
+Flask-Limiter
