@@ -1,4 +1,4 @@
-# finance_backend.py - Optimized Finance Markets Backend
+# finance_backend.py - Standalone Finance Markets Backend
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
@@ -34,14 +34,13 @@ UPDATE_INTERVAL = 300
 update_lock = threading.Lock()
 is_updating = False
 initialized = False
-init_lock = threading.Lock()
 
 gamma_api_url = "https://gamma-api.polymarket.com"
 
 def get_all_finance_events():
     """Fetch all finance events with parallel requests and proper ordering"""
     try:
-        print(f"\n[PID {os.getpid()}] 💰 Fetching finance markets...", flush=True)
+        print(f"\n💰 Fetching finance markets...", flush=True)
         start_time = time.time()
         
         all_events = []
@@ -62,7 +61,7 @@ def get_all_finance_events():
                 response.raise_for_status()
                 return response.json() if response.json() else []
             except Exception as e:
-                print(f"[PID {os.getpid()}] ❌ Error at offset {offset}: {e}", flush=True)
+                print(f"❌ Error at offset {offset}: {e}", flush=True)
                 return []
         
         # Parallel fetch with ordering preservation
@@ -81,7 +80,7 @@ def get_all_finance_events():
             if len(results[offset]) < limit:
                 break
         
-        print(f"[PID {os.getpid()}] 📦 Fetched {len(all_events)} total events", flush=True)
+        print(f"📦 Fetched {len(all_events)} total events", flush=True)
         
         # Filter for finance
         finance_keywords = ['finance', 'financial', 'stock', 'stocks', 'market',
@@ -138,11 +137,11 @@ def get_all_finance_events():
             })
         
         elapsed = time.time() - start_time
-        print(f"[PID {os.getpid()}] ✅ Found {len(formatted_events)} finance markets in {elapsed:.1f}s", flush=True)
+        print(f"✅ Found {len(formatted_events)} finance markets in {elapsed:.1f}s", flush=True)
         return formatted_events
     
     except Exception as e:
-        print(f"[PID {os.getpid()}] ❌ Error: {e}", flush=True)
+        print(f"❌ Error: {e}", flush=True)
         import traceback
         traceback.print_exc()
         return []
@@ -153,7 +152,7 @@ def update_finance_events():
     
     with update_lock:
         if is_updating:
-            print(f"[PID {os.getpid()}] ⏭️  Already updating, skipping", flush=True)
+            print("⏭️  Already updating, skipping", flush=True)
             return
         is_updating = True
     
@@ -164,52 +163,41 @@ def update_finance_events():
                 cached_finance_events = events
                 last_update = time.time()
                 is_updating = False
-            print(f"[PID {os.getpid()}] ✅ Cache updated: {len(events)} events", flush=True)
+            print(f"✅ Cache updated: {len(events)} events", flush=True)
     except Exception as e:
-        print(f"[PID {os.getpid()}] ❌ Update error: {e}", flush=True)
+        print(f"❌ Update error: {e}", flush=True)
         with update_lock:
             is_updating = False
 
 def background_updater():
     """Background thread for cache updates"""
-    print(f"[PID {os.getpid()}] 🔄 Background updater started", flush=True)
+    print("🔄 Background updater started", flush=True)
     while True:
         time.sleep(UPDATE_INTERVAL)
-        print(f"[PID {os.getpid()}] 🔄 Background refresh triggered", flush=True)
+        print("🔄 Background refresh triggered", flush=True)
         update_finance_events()
 
-def ensure_initialized():
-    """Initialize worker on first request (lazy initialization)"""
-    global initialized, cached_finance_events, last_update
+def initialize_app():
+    """Initialize the application cache and background thread"""
+    global initialized
     
-    # Quick check without lock
     if initialized:
         return
     
-    with init_lock:
-        # Double-check with lock
-        if initialized:
-            return
-        
-        print(f"\n{'='*60}", flush=True)
-        print(f"🚀 INITIALIZING FINANCE BACKEND (PID: {os.getpid()})", flush=True)
-        print(f"{'='*60}", flush=True)
-        
-        # Initial data load
-        update_finance_events()
-        
-        # Start background thread
-        bg_thread = threading.Thread(target=background_updater, daemon=True, name=f"updater-{os.getpid()}")
-        bg_thread.start()
-        
-        initialized = True
-        print(f"✅ Worker {os.getpid()} ready with {len(cached_finance_events)} events", flush=True)
-        print(f"{'='*60}\n", flush=True)
-
-@app.before_request
-def before_request():
-    """Initialize on first request"""
-    ensure_initialized()
+    print(f"\n{'='*60}", flush=True)
+    print("🚀 INITIALIZING FINANCE BACKEND", flush=True)
+    print(f"{'='*60}", flush=True)
+    
+    # Initial data load
+    update_finance_events()
+    
+    # Start background thread
+    bg_thread = threading.Thread(target=background_updater, daemon=True, name="cache-updater")
+    bg_thread.start()
+    
+    initialized = True
+    print(f"✅ Server ready with {len(cached_finance_events)} events", flush=True)
+    print(f"{'='*60}\n", flush=True)
 
 @app.route('/api/finance', methods=['GET'])
 def get_finance_events():
@@ -307,8 +295,7 @@ def health_check():
         'events_count': cache_size,
         'last_update': last_update,
         'cache_age_seconds': cache_age,
-        'is_updating': is_updating_now,
-        'worker_pid': os.getpid()
+        'is_updating': is_updating_now
     })
 
 @app.route('/api/finance/refresh', methods=['POST'])
@@ -319,5 +306,20 @@ def force_refresh():
     return jsonify({'success': True, 'message': 'Cache refresh initiated'})
 
 if __name__ == '__main__':
-    # DON'T initialize here - let it happen on first request
-    app.run(debug=True, host='0.0.0.0', port=8204)
+    # Initialize before starting the server
+    initialize_app()
+    
+    # Run with Flask's built-in server
+    # For production, consider using waitress or another WSGI server
+    port = int(os.getenv('PORT', 8204))
+    
+    print(f"\n🌐 Starting server on http://0.0.0.0:{port}")
+    print("Press CTRL+C to quit\n")
+    
+    app.run(
+        host='0.0.0.0',
+        port=port,
+        debug=False,  # Set to False for production
+        threaded=True,  # Enable threading for concurrent requests
+        use_reloader=False  # Disable reloader to prevent double initialization
+    )
