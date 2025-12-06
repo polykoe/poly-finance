@@ -1,4 +1,4 @@
-# finance_backend.py - Optimized Finance Markets Backend
+# finance_backend.py - Optimized Finance Markets Backend with Proper Market Formatting
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
@@ -6,6 +6,7 @@ import time
 import threading
 import gzip
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
@@ -39,7 +40,7 @@ init_lock = threading.Lock()
 gamma_api_url = "https://gamma-api.polymarket.com"
 
 def get_all_finance_events():
-    """Fetch all finance events with parallel requests and proper ordering"""
+    """Fetch all finance events with parallel requests and proper market formatting"""
     try:
         print(f"\n[PID {os.getpid()}] 💰 Fetching finance markets...", flush=True)
         start_time = time.time()
@@ -108,7 +109,7 @@ def get_all_finance_events():
             if is_finance:
                 finance_events.append(event)
         
-        # Format events
+        # Format events with proper market structure
         formatted_events = []
         for i, event in enumerate(finance_events, 1):
             tags_list = event.get('tags', [])
@@ -118,8 +119,57 @@ def get_all_finance_events():
             volume_24hr = float(event.get('volume24hr', 0)) if isinstance(event.get('volume24hr'), (int, float, str)) else 0
             liquidity = float(event.get('liquidity', 0)) if isinstance(event.get('liquidity'), (int, float, str)) else 0
             
+            # Filter event if both volume and liquidity are 0
+            if volume == 0 and liquidity == 0:
+                continue
+            
+            # Process markets with their outcome prices
+            formatted_markets = []
+            for market in markets:
+                # Get market liquidity and volume
+                market_liquidity = float(market.get('liquidity', 0)) if isinstance(market.get('liquidity'), (int, float, str)) else 0
+                market_volume = float(market.get('volume', 0)) if isinstance(market.get('volume'), (int, float, str)) else 0
+                
+                # Filter market if both are 0
+                if market_volume == 0 and market_liquidity == 0:
+                    continue
+                
+                # Parse outcome prices
+                outcome_prices_raw = market.get('outcomePrices', [])
+                outcome_prices = []
+                
+                if isinstance(outcome_prices_raw, str):
+                    try:
+                        outcome_prices = json.loads(outcome_prices_raw)
+                    except json.JSONDecodeError:
+                        outcome_prices = []
+                elif isinstance(outcome_prices_raw, list):
+                    outcome_prices = outcome_prices_raw
+                
+                # Get market status
+                market_closed = market.get('closed', False)
+                market_active = market.get('active', True)
+                is_live = market_active and not market_closed
+                
+                formatted_market = {
+                    'groupItemTitle': market.get('groupItemTitle', ''),
+                    'image': market.get('image') or market.get('icon') or event.get('image') or event.get('icon') or 'https://via.placeholder.com/40',
+                    'outcomePrices': outcome_prices,
+                    'outcomes': market.get('outcomes', []),
+                    'is_live': is_live,
+                    'closed': market_closed,
+                    'active': market_active,
+                    'liquidity': market_liquidity,
+                    'volume': market_volume
+                }
+                formatted_markets.append(formatted_market)
+            
+            # Skip event if no valid markets after filtering
+            if len(formatted_markets) == 0:
+                continue
+            
             formatted_events.append({
-                'rank': i,
+                'rank': len(formatted_events) + 1,
                 'id': event.get('id'),
                 'title': event.get('title'),
                 'slug': event.get('slug'),
@@ -132,9 +182,10 @@ def get_all_finance_events():
                 'liquidity': liquidity,
                 'description': event.get('description', ''),
                 'end_date': event.get('endDate'),
-                'market_count': len(markets),
+                'market_count': len(formatted_markets),
                 'category': event.get('category'),
-                'markets': markets
+                'markets': formatted_markets,
+                'is_live': event.get('active', True) and not event.get('closed', False)
             })
         
         elapsed = time.time() - start_time
@@ -182,12 +233,10 @@ def ensure_initialized():
     """Initialize worker on first request (lazy initialization)"""
     global initialized, cached_finance_events, last_update
     
-    # Quick check without lock
     if initialized:
         return
     
     with init_lock:
-        # Double-check with lock
         if initialized:
             return
         
@@ -195,10 +244,8 @@ def ensure_initialized():
         print(f"🚀 INITIALIZING FINANCE BACKEND (PID: {os.getpid()})", flush=True)
         print(f"{'='*60}", flush=True)
         
-        # Initial data load
         update_finance_events()
         
-        # Start background thread
         bg_thread = threading.Thread(target=background_updater, daemon=True, name=f"updater-{os.getpid()}")
         bg_thread.start()
         
@@ -243,7 +290,6 @@ def get_paginated_finance_markets():
         
         offset = int(request.args.get('offset', 0))
         limit = int(request.args.get('limit', 100))
-        include_markets = request.args.get('include_markets', 'false').lower() == 'true'
         
         if offset < 0:
             offset = 0
@@ -255,28 +301,6 @@ def get_paginated_finance_markets():
         
         paginated_events = cached_finance_events[start_idx:end_idx]
         has_more = end_idx < len(cached_finance_events)
-        
-        # Strip markets by default for performance
-        if not include_markets:
-            paginated_events = [
-                {
-                    'rank': e['rank'],
-                    'id': e['id'],
-                    'title': e['title'],
-                    'slug': e['slug'],
-                    'link': e['link'],
-                    'image': e['image'],
-                    'tags': e['tags'],
-                    'tag_labels': e['tag_labels'],
-                    'volume': e['volume'],
-                    'volume_24hr': e['volume_24hr'],
-                    'liquidity': e['liquidity'],
-                    'market_count': e['market_count'],
-                    'category': e.get('category'),
-                    'description': e.get('description', '')[:200] if e.get('description') else ''
-                }
-                for e in paginated_events
-            ]
         
         return jsonify({
             'success': True,
@@ -319,5 +343,4 @@ def force_refresh():
     return jsonify({'success': True, 'message': 'Cache refresh initiated'})
 
 if __name__ == '__main__':
-    # DON'T initialize here - let it happen on first request
     app.run(debug=True, host='0.0.0.0', port=8204)
